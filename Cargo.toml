@@ -1,6 +1,6 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
-members = ["crates/overlay-spike"]
+members = ["crates/overlay-spike", "crates/marmalade-sprites"]
 
 [profile.release]
 opt-level = "s"

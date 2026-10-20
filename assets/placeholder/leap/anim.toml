@@ -1,0 +1,7 @@
+fps = 12
+loop = false
+frames = 12
+
+[anchor]
+x = 128
+y = 248

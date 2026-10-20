@@ -1,0 +1,15 @@
+[package]
+name = "marmalade-sprites"
+version = "0.0.1"
+edition = "2021"
+description = "Marmalade sprite player: on-demand animation loading, mirroring, freeing frames when asleep"
+license = "MIT"
+
+[dependencies]
+image-webp = "0.2.4"
+png = "0.18.1"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+
+[dev-dependencies]
+tiny-skia = "0.12.0"

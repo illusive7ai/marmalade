@@ -2,11 +2,12 @@
 name = "overlay-spike"
 version = "0.0.1"
 edition = "2021"
-description = "Marmalade day-one spike: measure idle RAM/CPU of a native click-through cat overlay"
+description = "Marmalade overlay spike: measure idle RAM/CPU/wakeups of a native click-through sprite window"
 license = "MIT"
+publish = false
 
 [dependencies]
-tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+marmalade-sprites = { path = "../marmalade-sprites" }
 
 [dependencies.windows]
 version = "0.58"

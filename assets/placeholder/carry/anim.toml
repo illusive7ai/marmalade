@@ -1,0 +1,11 @@
+fps = 12
+loop = true
+frames = 12
+
+[anchor]
+x = 128
+y = 248
+
+[mouth]
+x = 200
+y = 150
