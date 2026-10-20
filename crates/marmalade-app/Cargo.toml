@@ -1,18 +1,20 @@
 [package]
-name = "overlay-spike"
+name = "marmalade"
 version = "0.0.1"
 edition = "2021"
-description = "Marmalade overlay spike: measure idle RAM/CPU/wakeups of a native click-through sprite window"
+description = "Marmalade: a desktop cat that does your repetitive tasks when you ask"
 license = "MIT"
 publish = false
 
 [dependencies]
+marmalade-core = { path = "../marmalade-core" }
 marmalade-sprites = { path = "../marmalade-sprites" }
 
 [dependencies.windows]
 version = "0.58"
 features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_UI_Input_KeyboardAndMouse",

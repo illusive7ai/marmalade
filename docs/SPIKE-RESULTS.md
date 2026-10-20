@@ -31,6 +31,23 @@ Takeaways:
   frames are likely still held by the allocator rather than returned to the OS. Follow-up: try
   `HeapCompact` after `sleep()`, or decode into a dedicated heap that can be destroyed.
 
+## Run 3: the app with the chat bar and command router (bar created but hidden)
+
+The spike became the real app (`crates/marmalade-app`, binary `marmalade.exe`, 577 KB). The chat bar is a
+native EDIT control in a rounded dark window, plus `marmalade-core` for routing.
+
+| State | Private MB | Working set MB | CPU % (all cores) | Context switches/s | Threads |
+|---|---|---|---|---|---|
+| Awake (12 fps walk) | 4.7 | 10.8 | 0.19 | 27 | 4 |
+| Asleep | 2.4 | 8.5 | 0.00 | 0 | 1 |
+
+The hidden bar adds about 0.3 MB awake and nothing measurable asleep. Not yet measured: memory and CPU
+while the bar is open and while typing.
+
+End-to-end check (real hotkey and keystrokes, with screenshots reviewed): Ctrl+Alt+Space opened the bar and
+focused the input; the live preview showed "Find PDF files from the last week"; Enter ran the stub and cleared
+the input; `print invoice.pdf` asked for a second Enter; Esc cancelled the confirmation, a second Esc closed the bar.
+
 ## Budgets (scripts/measure.ps1)
 
 | Metric | Budget |

@@ -1,0 +1,6 @@
+[package]
+name = "marmalade-core"
+version = "0.0.1"
+edition = "2021"
+description = "Marmalade core: validated actions and the local command router"
+license = "MIT"

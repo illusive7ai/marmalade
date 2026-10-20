@@ -7,7 +7,7 @@
 #
 # The spike stays awake for 15 s after launch, then sleeps (timer killed).
 param(
-    [string]$Exe = "$PSScriptRoot\..\target\release\overlay-spike.exe",
+    [string]$Exe = "$PSScriptRoot\..\target\release\marmalade.exe",
     [int]$AwakeSampleSecs = 8,
     [int]$SleepSampleSecs = 20,
     [switch]$Enforce
