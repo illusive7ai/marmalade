@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use marmalade_sprites::SpritePlayer;
+
+use crate::fetch::{self, Phase, Scene};
+use crate::props;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
@@ -19,21 +22,26 @@ use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
     HBITMAP, HDC, HGDIOBJ,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, KillTimer, PostQuitMessage, RegisterClassW, SetTimer,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW,
-    HWND_TOPMOST, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA, WM_DESTROY, WM_HOTKEY, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, KillTimer, PostQuitMessage,
+    RegisterClassW, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, UpdateLayeredWindow,
+    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
+    WM_DESTROY, WM_HOTKEY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 pub const W: i32 = 256;
 pub const H: i32 = 256;
 const AWAKE_SECS: u64 = 15;
 const TIMER_ID: usize = 1;
+/// Drives the fetch scene at ~60 fps; only armed while the scene runs.
+const SCENE_TIMER: usize = 2;
+const SCENE_FRAME_MS: u32 = 16;
 const HK_WAKE: i32 = 1;
 const HK_QUIT: i32 = 2;
 const HK_BAR: i32 = 3;
@@ -51,6 +59,26 @@ struct Cat {
     awake: bool,
     /// Keep awake regardless of the timeout (the chat bar is open).
     hold: bool,
+    /// Draw the carried file at the cat's mouth.
+    carrying: bool,
+    scene: Option<Active>,
+}
+
+/// A running fetch scene and everything it created.
+struct Active {
+    scene: Scene,
+    folder: Option<Prop>,
+    folder_shown: bool,
+    cat_shown: bool,
+    was_mirrored: bool,
+    on_done: Option<Box<dyn FnOnce()>>,
+}
+
+/// A small click-through window showing a fixed bitmap (the folder).
+struct Prop {
+    hwnd: HWND,
+    dc: HDC,
+    bitmap: HBITMAP,
 }
 
 thread_local! {
@@ -157,6 +185,8 @@ pub fn create(hinst: HINSTANCE) -> windows::core::Result<HWND> {
                 awake_until: now + Duration::from_secs(AWAKE_SECS),
                 awake: true,
                 hold: false,
+                carrying: false,
+                scene: None,
             });
         });
 
@@ -241,6 +271,263 @@ pub fn release() {
     reschedule();
 }
 
+/// True while the fetch scene owns the cat.
+pub fn busy() -> bool {
+    with_cat(|c| c.scene.is_some()).unwrap_or(false)
+}
+
+/// Play the fetch scene from wherever the cat is now, then run `on_done` when the file is
+/// delivered. The cat goes back to its corner afterwards. Runs `on_done` at once if the cat
+/// cannot perform (no window), so the caller never loses the action.
+pub fn start_fetch(on_done: Box<dyn FnOnce()>) {
+    let mut callback = Some(on_done);
+    let timer_hwnd = with_cat(|cat| {
+        let mut r = RECT::default();
+        // SAFETY: valid window handle owned by this thread; `r` is a valid RECT.
+        unsafe {
+            let _ = GetWindowRect(cat.hwnd, &mut r);
+        }
+        let work = work_area();
+        let plan = fetch::plan((r.left, r.top), work.left, work.right);
+
+        let was_mirrored = cat.player.mirrored();
+        cat.player.set_mirrored(plan.dir < 0);
+        let _ = cat.player.play("leap");
+        let leap_secs = cat.player.duration().map_or(1.0, |d| d.as_secs_f64());
+
+        cat.hold = true;
+        cat.awake = true;
+        cat.last_tick = Instant::now();
+        cat.scene = Some(Active {
+            scene: Scene::new(plan, leap_secs),
+            folder: create_prop(
+                &props::folder_pixels(),
+                fetch::FOLDER_W,
+                fetch::FOLDER_H,
+                plan.folder,
+            ),
+            folder_shown: true,
+            cat_shown: true,
+            was_mirrored,
+            on_done: callback.take(),
+        });
+        cat.hwnd
+    });
+    let Some(hwnd) = timer_hwnd else {
+        if let Some(f) = callback {
+            f();
+        }
+        return;
+    };
+    render();
+    // SAFETY: valid window handle owned by this thread.
+    unsafe {
+        let _ = KillTimer(hwnd, TIMER_ID);
+        SetTimer(hwnd, SCENE_TIMER, SCENE_FRAME_MS, None);
+    }
+}
+
+/// One scene frame: advance the timeline, switch clips on phase changes, move the windows.
+fn scene_tick() {
+    let finished = with_cat(|cat| {
+        let Some(act) = cat.scene.as_mut() else {
+            return false;
+        };
+        let now = Instant::now();
+        let dt = now - cat.last_tick;
+        cat.last_tick = now;
+        cat.player.tick(dt);
+
+        let before = act.scene.phase();
+        act.scene.tick(dt.as_secs_f64(), cat.player.is_finished());
+        let pose = act.scene.pose();
+        if act.scene.phase() != before {
+            if let Some(clip) = act.scene.clip() {
+                let _ = cat.player.play(clip);
+            }
+        }
+        cat.player.set_mirrored(pose.mirrored);
+        cat.carrying = pose.carrying;
+
+        // SAFETY: valid windows owned by this thread.
+        unsafe {
+            if pose.cat_visible != act.cat_shown {
+                let cmd = if pose.cat_visible {
+                    SW_SHOWNOACTIVATE
+                } else {
+                    SW_HIDE
+                };
+                let _ = ShowWindow(cat.hwnd, cmd);
+                act.cat_shown = pose.cat_visible;
+            }
+            if pose.cat_visible {
+                let _ = SetWindowPos(
+                    cat.hwnd,
+                    None,
+                    pose.cat.0,
+                    pose.cat.1,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+            }
+            if let Some(folder) = &act.folder {
+                if pose.folder_visible != act.folder_shown {
+                    let cmd = if pose.folder_visible {
+                        SW_SHOWNOACTIVATE
+                    } else {
+                        SW_HIDE
+                    };
+                    let _ = ShowWindow(folder.hwnd, cmd);
+                    act.folder_shown = pose.folder_visible;
+                }
+                if pose.folder_visible {
+                    let _ = SetWindowPos(
+                        folder.hwnd,
+                        None,
+                        pose.folder.0,
+                        pose.folder.1,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                }
+            }
+        }
+        act.scene.phase() == Phase::Done
+    })
+    .unwrap_or(false);
+    render();
+    if finished {
+        end_scene();
+    }
+}
+
+/// Tear the scene down, send the cat home, then hand the file over.
+fn end_scene() {
+    let done = with_cat(|cat| {
+        let act = cat.scene.take()?;
+        cat.carrying = false;
+        cat.player.set_mirrored(act.was_mirrored);
+        // SAFETY: valid windows/handles owned by this thread, released exactly once.
+        unsafe {
+            let _ = KillTimer(cat.hwnd, SCENE_TIMER);
+            let _ = ShowWindow(cat.hwnd, SW_SHOWNOACTIVATE);
+            if let Some(folder) = act.folder {
+                destroy_prop(folder);
+            }
+        }
+        act.on_done
+    })
+    .flatten();
+    release();
+    if let Some(f) = done {
+        f();
+    }
+}
+
+/// Create a click-through, always-on-top window showing `pixels` (premultiplied BGRA) at `pos`.
+fn create_prop(pixels: &[u8], w: i32, h: i32, pos: (i32, i32)) -> Option<Prop> {
+    // SAFETY: plain Win32 window/DIB setup on the UI thread; every handle is checked and any
+    // partial creation is released before returning `None`.
+    unsafe {
+        let hinst: HINSTANCE = GetModuleHandleW(None).ok()?.into();
+        let class = w!("MarmaladeProp");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(prop_proc),
+            hInstance: hinst,
+            lpszClassName: class,
+            ..Default::default()
+        };
+        RegisterClassW(&wc); // fails harmlessly when already registered
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            class,
+            PCWSTR::null(),
+            WS_POPUP,
+            pos.0,
+            pos.1,
+            w,
+            h,
+            None,
+            None,
+            hinst,
+            None,
+        )
+        .ok()?;
+
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(screen);
+        ReleaseDC(None, screen);
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(bitmap) = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(dc);
+            let _ = DestroyWindow(hwnd);
+            return None;
+        };
+        if bits.is_null() || pixels.len() != (w * h * 4) as usize {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(dc);
+            let _ = DestroyWindow(hwnd);
+            return None;
+        }
+        // `bits` is a w*h*4-byte DIB section and the source length was checked above.
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u8, pixels.len());
+        SelectObject(dc, HGDIOBJ(bitmap.0));
+
+        let size = SIZE { cx: w, cy: h };
+        let zero = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let _ = UpdateLayeredWindow(
+            hwnd,
+            None,
+            None,
+            Some(&size),
+            dc,
+            Some(&zero),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        );
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        Some(Prop { hwnd, dc, bitmap })
+    }
+}
+
+unsafe extern "system" fn prop_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+/// # Safety
+/// `prop` must come from `create_prop` and not have been destroyed.
+unsafe fn destroy_prop(prop: Prop) {
+    let _ = DestroyWindow(prop.hwnd);
+    let _ = DeleteObject(HGDIOBJ(prop.bitmap.0));
+    let _ = DeleteDC(prop.dc);
+}
+
 fn reschedule() {
     if let Some(hwnd) = with_cat(|c| c.hwnd) {
         // SAFETY: valid window handle owned by this thread.
@@ -253,6 +540,10 @@ fn reschedule() {
 /// # Safety
 /// `hwnd` must be the cat window, on the thread that owns it.
 unsafe fn schedule(hwnd: HWND) {
+    if busy() {
+        let _ = KillTimer(hwnd, TIMER_ID); // the scene timer drives the player meanwhile
+        return;
+    }
     let next = with_cat(|cat| cat.player.wake_in()).flatten();
     match next {
         Some(d) => {
@@ -266,6 +557,10 @@ unsafe fn schedule(hwnd: HWND) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        WM_TIMER if wparam.0 == SCENE_TIMER => {
+            scene_tick();
+            LRESULT(0)
+        }
         WM_TIMER => {
             let changed = with_cat(|cat| {
                 let now = Instant::now();
@@ -288,7 +583,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_HOTKEY => {
             match wparam.0 as i32 {
-                HK_WAKE => {
+                HK_WAKE if !busy() => {
                     with_cat(|cat| {
                         let now = Instant::now();
                         cat.awake = true;
@@ -323,6 +618,11 @@ fn render() {
             let dst = std::slice::from_raw_parts_mut(cat.bits, (W * H * 4) as usize);
             dst.fill(0);
             cat.player.blit(dst, W as u32, H as u32, 0, 0);
+            if cat.carrying {
+                if let Some((mx, my)) = cat.player.mouth() {
+                    props::draw_file(dst, W, H, mx, my);
+                }
+            }
 
             let size = SIZE { cx: W, cy: H };
             let zero = POINT { x: 0, y: 0 };

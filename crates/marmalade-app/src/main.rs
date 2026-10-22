@@ -10,7 +10,9 @@
 
 mod bar;
 mod cat;
+mod fetch;
 mod handler;
+mod props;
 
 use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;

@@ -260,3 +260,27 @@ fn decodes_lossless_webp_with_alpha() {
     assert_eq!(&f.bgra[0..4], &[50, 100, 200, 255]);
     assert_eq!(f.bgra[7], 0);
 }
+
+#[test]
+fn reports_duration_and_a_mirrored_mouth() {
+    let t = TempDir::new();
+    make_anim(t.path(), "carry", 10, true, 5, 8, 4);
+    let toml = t.path().join("carry").join("anim.toml");
+    let mut text = fs::read_to_string(&toml).unwrap();
+    text.push_str(
+        "[mouth]
+x = 6
+y = 1
+",
+    );
+    fs::write(&toml, text).unwrap();
+
+    let mut p = SpritePlayer::new(t.path());
+    assert_eq!(p.duration(), None);
+    assert_eq!(p.mouth(), None);
+    p.play("carry").unwrap();
+    assert_eq!(p.duration(), Some(Duration::from_millis(500)));
+    assert_eq!(p.mouth(), Some((6, 1)));
+    p.set_mirrored(true);
+    assert_eq!(p.mouth(), Some((1, 1))); // 8 - 1 - 6
+}

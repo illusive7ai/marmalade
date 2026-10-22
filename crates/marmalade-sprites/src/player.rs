@@ -100,6 +100,31 @@ impl SpritePlayer {
         }
     }
 
+    /// Length of the loaded animation, or `None` when nothing is playing.
+    pub fn duration(&self) -> Option<Duration> {
+        match &self.mode {
+            Mode::Playing(a) => Some(Duration::from_secs_f64(
+                a.frames.len() as f64 / a.meta.fps as f64,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Where a carried item is drawn, in frame pixels, already flipped when mirrored.
+    /// Only animations that declare `[mouth]` (`carry`) have one.
+    pub fn mouth(&self) -> Option<(i32, i32)> {
+        let Mode::Playing(a) = &self.mode else {
+            return None;
+        };
+        let m = a.meta.mouth?;
+        let width = a.frames.first()?.width as i32;
+        Some(if self.mirrored {
+            (width - 1 - m.x, m.y)
+        } else {
+            (m.x, m.y)
+        })
+    }
+
     /// Time until the next frame change, or `None` if nothing will change (asleep, empty, or a
     /// finished one-shot). Use this to arm one timer instead of ticking at a fixed rate.
     pub fn wake_in(&self) -> Option<Duration> {

@@ -254,6 +254,9 @@ unsafe fn font(height: i32) -> HFONT {
 }
 
 pub fn toggle() {
+    if crate::cat::busy() {
+        return; // the cat is fetching a file
+    }
     let visible = with_bar(|b| b.visible).unwrap_or(false);
     if visible {
         hide();
@@ -298,6 +301,13 @@ fn show() {
 }
 
 fn hide() {
+    if hide_window() {
+        crate::cat::release();
+    }
+}
+
+/// Hide the bar without moving the cat. Returns false if there is no bar.
+fn hide_window() -> bool {
     let Some(hwnd) = with_bar(|b| {
         b.visible = false;
         b.pending = None;
@@ -305,13 +315,13 @@ fn hide() {
         b.search_gen += 1;
         b.hwnd
     }) else {
-        return;
+        return false;
     };
     // SAFETY: valid window owned by this thread.
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
-    crate::cat::release();
+    true
 }
 
 /// Size and place the window for the current number of results, keeping the input where it is.
@@ -537,13 +547,20 @@ fn activate(path: &Path, open_it: bool) {
         set_preview(Tone::Attention, "I won't open that location.".into());
         return;
     }
-    // SAFETY: ShellExecuteW with literal verbs and a validated path, on the UI thread.
+    // The cat fetches it first; the file opens when it is delivered.
+    hide_window();
+    crate::cat::start_fetch(Box::new(move || reveal(&text, open_it)));
+}
+
+/// Open the file (Ctrl+Enter, when it is safe to run) or show it selected in Explorer.
+fn reveal(text: &str, open_it: bool) {
+    // SAFETY: ShellExecuteW with literal verbs and a path validated in `activate`, on the UI thread.
     unsafe {
-        if open_it && paths::is_safe_to_open(&text) {
+        if open_it && paths::is_safe_to_open(text) {
             ShellExecuteW(
                 None,
                 w!("open"),
-                &HSTRING::from(text.as_str()),
+                &HSTRING::from(text),
                 PCWSTR::null(),
                 PCWSTR::null(),
                 SW_SHOWNORMAL,
@@ -559,7 +576,6 @@ fn activate(path: &Path, open_it: bool) {
             );
         }
     }
-    hide();
 }
 
 fn clear_input() {
