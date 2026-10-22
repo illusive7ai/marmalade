@@ -42,6 +42,7 @@ const TIMER_ID: usize = 1;
 /// Drives the fetch scene at ~60 fps; only armed while the scene runs.
 const SCENE_TIMER: usize = 2;
 const SCENE_FRAME_MS: u32 = 16;
+const MAX_SCENE_STEP: Duration = Duration::from_millis(100);
 const HK_WAKE: i32 = 1;
 const HK_QUIT: i32 = 2;
 const HK_BAR: i32 = 3;
@@ -107,11 +108,17 @@ fn assets_dir() -> PathBuf {
     if let Some(arg) = std::env::args().nth(1) {
         return arg.into();
     }
-    let mut candidates = vec![PathBuf::from("assets/placeholder")];
+    // The real cat first, the generated placeholder shapes as a fallback.
+    let mut candidates = vec![
+        PathBuf::from("assets/cat"),
+        PathBuf::from("assets/placeholder"),
+    ];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("../../assets/placeholder"));
-            candidates.push(dir.join("assets/placeholder"));
+            for pack in ["cat", "placeholder"] {
+                candidates.push(dir.join("../../assets").join(pack));
+                candidates.push(dir.join("assets").join(pack));
+            }
         }
     }
     candidates
@@ -334,7 +341,8 @@ fn scene_tick() {
             return false;
         };
         let now = Instant::now();
-        let dt = now - cat.last_tick;
+        // A stalled frame (e.g. decoding the next clip) must not fast-forward the scene.
+        let dt = (now - cat.last_tick).min(MAX_SCENE_STEP);
         cat.last_tick = now;
         cat.player.tick(dt);
 
@@ -344,6 +352,7 @@ fn scene_tick() {
         if act.scene.phase() != before {
             if let Some(clip) = act.scene.clip() {
                 let _ = cat.player.play(clip);
+                cat.last_tick = Instant::now(); // loading took time; the clip starts now
             }
         }
         cat.player.set_mirrored(pose.mirrored);

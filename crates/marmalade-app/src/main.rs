@@ -5,7 +5,7 @@
 //!   Ctrl+Alt+M      wake the cat (and flip its facing)
 //!   Ctrl+Alt+Q      quit
 //!
-//! Usage: marmalade.exe [assets_dir]   (default: assets/placeholder, found relative to cwd or exe)
+//! Usage: marmalade.exe [assets_dir]   (default: assets/cat, else assets/placeholder, found relative to cwd or exe)
 #![windows_subsystem = "windows"]
 
 mod bar;
