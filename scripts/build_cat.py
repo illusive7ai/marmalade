@@ -20,7 +20,7 @@ SW, SH = 832, 1120        # source size
 CANVAS = 256
 FOOT = (128, 248)         # where the feet go in the 256x256 frame
 S = 0.33                  # shared source->frame scale (same for every clip so the cat is the same size)
-SCALE = {'carry': 0.29, 'lie': 0.30, 'leap': 0.31}   # per-animation overrides where the cat is wider than the frame
+SCALE = {'carry': 0.29, 'lie': 0.30, 'leap': 0.31, 'walk': 0.31}   # per-animation overrides where the cat is wider than the frame
 S_PEEK = 0.18             # the peek clip is framed much closer; shrink it so the head matches the others
 FPS_SRC = 24
 
@@ -144,15 +144,37 @@ def small(c):
     return f
 
 
-def find_loop(frames, lo, hi, a_min=0):
+def find_loop(frames, lo, hi, a_min=0, tail=0):
+    """Best (error, start, length). `tail` frames after the loop are kept free for the seam dissolve."""
     sm = [small(f) for f in frames]
     best = None
     for L in range(lo, hi + 1, 2):
-        for a in range(a_min, len(frames) - L):
+        for a in range(a_min, len(frames) - L - tail + 1):
             d = float(np.mean((sm[a] - sm[a + L]) ** 2))
             if best is None or d < best[0]:
                 best = (d, a, L)
     return best
+
+
+def blend(f1, f2, w):
+    """Straight-alpha RGBA uint8 blend, done in premultiplied space: w=0 -> f1, w=1 -> f2."""
+    def pm(f):
+        x = f.astype(np.float32)
+        x[..., :3] *= x[..., 3:4] / 255.0
+        return x
+    m = pm(f1) * (1 - w) + pm(f2) * w
+    a = m[..., 3:4]
+    rgb = np.where(a > 0, m[..., :3] * 255.0 / np.maximum(a, 1e-3), 0)
+    return np.concatenate([np.clip(rgb, 0, 255), a], -1).round().astype(np.uint8)
+
+
+def close_loop(frames, a, L, k):
+    """Frames a..a+L-1 as a loop whose first k frames dissolve in from the frames that would
+    have followed the last one, so the wrap-around is as smooth as any other step."""
+    seg = list(frames[a:a + L])
+    for j in range(k):
+        seg[j] = blend(frames[a + L + j], frames[a + j], (j + 1) / (k + 1))
+    return seg
 
 
 def mouth_point(frames):
@@ -215,9 +237,10 @@ def main(names):
             a_min = 0
             if name in ('sit', 'lie'):
                 a_min = 0
-            d, a, L = find_loop(frames, *loop_cfg, a_min=a_min)
+            tail = 4
+            d, a, L = find_loop(frames, *loop_cfg, a_min=a_min, tail=tail)
             L -= L % 2
-            seg = frames[a:a + L][::step]
+            seg = close_loop(frames, a, L, tail)[::step]
             info += f', loop a={a} L={L} seam_mse={d:.5f}'
             loop = True
         elif name == 'peek':

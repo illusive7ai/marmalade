@@ -48,8 +48,8 @@ const FADE_SECS: f32 = 0.16;
 const HK_WAKE: i32 = 1;
 const HK_QUIT: i32 = 2;
 const HK_BAR: i32 = 3;
-const WALK: &str = "walk";
 const SIT: &str = "sit";
+const SLEEP: &str = "sleep";
 
 struct Cat {
     hwnd: HWND,
@@ -702,9 +702,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let dt = now - cat.last_tick;
                 cat.last_tick = now;
                 let mut changed = cat.player.tick(dt);
+                if cat.fade.is_some() {
+                    changed = true; // the dissolve needs a redraw every tick
+                    if cat
+                        .fade
+                        .as_ref()
+                        .is_some_and(|f| f.started.elapsed().as_secs_f32() >= FADE_SECS)
+                    {
+                        cat.fade = None;
+                        if !cat.awake {
+                            cat.player.sleep(); // frees every frame but the one on screen
+                        }
+                    }
+                }
                 if cat.awake && !cat.hold && now >= cat.awake_until {
                     cat.awake = false;
-                    cat.player.sleep(); // frees every frame but the one on screen
+                    switch_clip(cat, SLEEP); // curl up, dissolving from the sitting pose
+                    if cat.fade.is_none() {
+                        cat.player.sleep();
+                    }
                     changed = true;
                 }
                 changed
@@ -726,7 +742,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         cat.last_tick = now;
                         let mirrored = cat.player.mirrored();
                         cat.player.set_mirrored(!mirrored);
-                        let _ = cat.player.play(WALK);
+                        switch_clip(cat, SIT);
                     });
                     render();
                     schedule(hwnd);
