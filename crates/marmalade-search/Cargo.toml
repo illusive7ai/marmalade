@@ -1,0 +1,22 @@
+[package]
+name = "marmalade-search"
+version = "0.0.1"
+edition = "2021"
+description = "Marmalade file search: Windows Search index with a bounded folder-walk fallback"
+license = "MIT"
+publish = false
+
+[dependencies]
+marmalade-core = { path = "../marmalade-core" }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Storage",
+    "Storage_Search",
+    "Win32_Foundation",
+    "Win32_System_Time",
+    "Win32_System_WinRT",
+]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/marmalade-app", "crates/marmalade-sprites", "crates/marmalade-core"]
+members = ["crates/marmalade-app", "crates/marmalade-sprites", "crates/marmalade-core", "crates/marmalade-search"]
 
 [profile.release]
 opt-level = "s"

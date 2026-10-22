@@ -116,6 +116,7 @@ name = "marmalade"
 version = "0.0.1"
 dependencies = [
  "marmalade-core",
+ "marmalade-search",
  "marmalade-sprites",
  "windows",
 ]
@@ -123,6 +124,14 @@ dependencies = [
 [[package]]
 name = "marmalade-core"
 version = "0.0.1"
+
+[[package]]
+name = "marmalade-search"
+version = "0.0.1"
+dependencies = [
+ "marmalade-core",
+ "windows",
+]
 
 [[package]]
 name = "marmalade-sprites"

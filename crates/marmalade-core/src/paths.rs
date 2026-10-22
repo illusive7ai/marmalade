@@ -89,6 +89,32 @@ pub fn extension_of(text: &str) -> Option<String> {
     }
 }
 
+/// Extensions that are fine to hand to the default app when the user asks to open a file found
+/// by search. An allow-list on purpose: a block-list always misses some launchable type. Macro-enabled
+/// Office formats (docm, xlsm, pptm), scripts, programs, shortcuts, web pages and archives are absent.
+const SAFE_TO_OPEN: &[&str] = &[
+    "pdf", "txt", "md", "log", "rtf", "doc", "docx", "odt", "xls", "xlsx", "ods", "csv", "ppt",
+    "pptx", "odp", "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "tiff", "mp3", "wav", "m4a",
+    "flac", "ogg", "aac", "mp4", "mov", "mkv", "avi", "webm",
+];
+
+/// True if opening this file with its default app is acceptable. Anything else (programs, scripts,
+/// shortcuts, no extension, alternate data streams) should be shown in its folder, never launched.
+pub fn is_safe_to_open(path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    // Windows ignores trailing dots and spaces, so "a.exe." is still a program.
+    let name = name.trim_end_matches(['.', ' ']);
+    if name.contains(':') {
+        return false;
+    }
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => {
+            SAFE_TO_OPEN.contains(&ext.to_ascii_lowercase().as_str())
+        }
+        _ => false,
+    }
+}
+
 /// Validate and normalise (forward slashes become backslashes). Does not touch the filesystem.
 pub fn check(text: &str) -> Result<PathBuf, PathError> {
     let t = text

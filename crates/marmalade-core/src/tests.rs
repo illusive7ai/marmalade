@@ -246,6 +246,43 @@ fn scan_patterns() {
     needs_more(r"scan \\server\share\a.exe");
 }
 
+// ---- opening files found by search ----
+
+#[test]
+fn only_documents_and_media_are_safe_to_open() {
+    for ok in [
+        r"C:\Users\me\cv.pdf",
+        r"C:\Users\me\Report.DOCX",
+        "photo.JPG",
+        "notes.md",
+        "song.mp3",
+        "a.pdf ",    // trailing space is ignored by Windows
+        "a/b/c.png", // forward slashes
+    ] {
+        assert!(paths::is_safe_to_open(ok), "{ok}");
+    }
+    for bad in [
+        "setup.exe",
+        "run.bat",
+        "script.ps1",
+        "x.js",
+        "link.lnk",
+        "page.html",
+        "macro.docm",
+        "budget.xlsm",
+        "invoice.pdf.exe", // double extension: the last one wins
+        "invoice.exe.",    // trailing dot is ignored by Windows
+        "readme",          // no extension
+        ".gitignore",
+        "notes.txt:evil.exe", // alternate data stream
+        r"C:\x\archive.zip",
+        "vector.svg",
+        "",
+    ] {
+        assert!(!paths::is_safe_to_open(bad), "{bad}");
+    }
+}
+
 // ---- misc ----
 
 #[test]
