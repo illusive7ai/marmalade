@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use marmalade_sprites::SpritePlayer;
 
-use crate::fetch::{self, Phase, Scene};
+use crate::fetch::{self, Scene};
 use crate::props;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
@@ -43,6 +43,8 @@ const TIMER_ID: usize = 1;
 const SCENE_TIMER: usize = 2;
 const SCENE_FRAME_MS: u32 = 16;
 const MAX_SCENE_STEP: Duration = Duration::from_millis(100);
+/// How long one clip dissolves into the next.
+const FADE_SECS: f32 = 0.16;
 const HK_WAKE: i32 = 1;
 const HK_QUIT: i32 = 2;
 const HK_BAR: i32 = 3;
@@ -63,6 +65,18 @@ struct Cat {
     /// Draw the carried file at the cat's mouth.
     carrying: bool,
     scene: Option<Active>,
+    /// The previous clip's last frame, dissolving into the one that just started.
+    fade: Option<Fade>,
+    /// Whole-cat opacity (the leap fades out into the folder).
+    alpha: f32,
+    /// Screen row of the window's top, and the screen row from which the cat is hidden behind the folder.
+    win_y: i32,
+    clip_y: Option<i32>,
+}
+
+struct Fade {
+    from: Vec<u8>,
+    started: Instant,
 }
 
 /// A running fetch scene and everything it created.
@@ -178,7 +192,7 @@ pub fn create(hinst: HINSTANCE) -> windows::core::Result<HWND> {
         ReleaseDC(None, screen);
 
         let mut player = SpritePlayer::new(assets_dir());
-        let _ = player.play(WALK); // on failure the window stays transparent; nothing to draw
+        let _ = player.play(SIT); // on failure the window stays transparent; nothing to draw
 
         let now = Instant::now();
         CAT.with(|c| {
@@ -194,6 +208,10 @@ pub fn create(hinst: HINSTANCE) -> windows::core::Result<HWND> {
                 hold: false,
                 carrying: false,
                 scene: None,
+                fade: None,
+                alpha: 1.0,
+                win_y: y,
+                clip_y: None,
             });
         });
 
@@ -260,7 +278,11 @@ pub fn release() {
         cat.hold = false;
         cat.awake_until = Instant::now() + Duration::from_secs(AWAKE_SECS);
         cat.last_tick = Instant::now();
-        let _ = cat.player.play(WALK);
+        cat.fade = None;
+        cat.alpha = 1.0;
+        cat.clip_y = None;
+        cat.win_y = y;
+        let _ = cat.player.play(SIT);
         // SAFETY: valid window handle owned by this thread.
         unsafe {
             let _ = SetWindowPos(
@@ -283,8 +305,24 @@ pub fn busy() -> bool {
     with_cat(|c| c.scene.is_some()).unwrap_or(false)
 }
 
+/// Switch to clip `id`, dissolving from whatever is on screen now. Loading can take a while, so
+/// the clip's clock starts afterwards.
+fn switch_clip(cat: &mut Cat, id: &str) {
+    if cat.player.current_id() == Some(id) {
+        return;
+    }
+    // SAFETY: `bits` points at the W*H*4-byte DIB section created in `create`.
+    let on_screen = unsafe { std::slice::from_raw_parts(cat.bits, (W * H * 4) as usize) }.to_vec();
+    let _ = cat.player.play(id);
+    cat.last_tick = Instant::now();
+    cat.fade = Some(Fade {
+        from: on_screen,
+        started: Instant::now(),
+    });
+}
+
 /// Play the fetch scene from wherever the cat is now, then run `on_done` when the file is
-/// delivered. The cat goes back to its corner afterwards. Runs `on_done` at once if the cat
+/// delivered. The cat walks back to its corner afterwards. Runs `on_done` at once if the cat
 /// cannot perform (no window), so the caller never loses the action.
 pub fn start_fetch(on_done: Box<dyn FnOnce()>) {
     let mut callback = Some(on_done);
@@ -297,16 +335,27 @@ pub fn start_fetch(on_done: Box<dyn FnOnce()>) {
         let work = work_area();
         let plan = fetch::plan((r.left, r.top), work.left, work.right);
 
-        let was_mirrored = cat.player.mirrored();
-        cat.player.set_mirrored(plan.dir < 0);
-        let _ = cat.player.play("leap");
-        let leap_secs = cat.player.duration().map_or(1.0, |d| d.as_secs_f64());
+        // The jump arc is timed to the leap clip, so ask how long it is.
+        let mut probe = SpritePlayer::new(assets_dir());
+        let leap_secs = probe
+            .play("leap")
+            .ok()
+            .and_then(|_| probe.duration())
+            .map_or(1.0, |d| d.as_secs_f64());
+        let segs = fetch::build(plan, leap_secs, corner_position());
 
+        let was_mirrored = cat.player.mirrored();
+        cat.player.set_mirrored(segs[0].mirrored);
+        if let Some(clip) = segs[0].clip {
+            switch_clip(cat, clip);
+        }
         cat.hold = true;
         cat.awake = true;
         cat.last_tick = Instant::now();
+        cat.alpha = 1.0;
+        cat.clip_y = None;
         cat.scene = Some(Active {
-            scene: Scene::new(plan, leap_secs),
+            scene: Scene::new(segs, plan.folder),
             folder: create_prop(
                 &props::folder_pixels(),
                 fetch::FOLDER_W,
@@ -334,11 +383,12 @@ pub fn start_fetch(on_done: Box<dyn FnOnce()>) {
     }
 }
 
-/// One scene frame: advance the timeline, switch clips on phase changes, move the windows.
+/// One scene frame: advance the timeline, start the next clip when a segment changes, move the windows.
 fn scene_tick() {
-    let finished = with_cat(|cat| {
-        let Some(act) = cat.scene.as_mut() else {
-            return false;
+    let (finished, deliver) = with_cat(|cat| {
+        // Taken out so `switch_clip` can borrow the whole cat; put back below.
+        let Some(mut act) = cat.scene.take() else {
+            return (false, None);
         };
         let now = Instant::now();
         // A stalled frame (e.g. decoding the next clip) must not fast-forward the scene.
@@ -346,30 +396,43 @@ fn scene_tick() {
         cat.last_tick = now;
         cat.player.tick(dt);
 
-        let before = act.scene.phase();
-        act.scene.tick(dt.as_secs_f64(), cat.player.is_finished());
-        let pose = act.scene.pose();
-        if act.scene.phase() != before {
-            if let Some(clip) = act.scene.clip() {
-                let _ = cat.player.play(clip);
-                cat.last_tick = Instant::now(); // loading took time; the clip starts now
+        if act.scene.tick(dt.as_secs_f64(), cat.player.is_finished()) {
+            if let Some(clip) = act.scene.current().and_then(|s| s.clip) {
+                switch_clip(cat, clip);
             }
         }
+        let deliver = if act.scene.take_deliver() {
+            act.on_done.take()
+        } else {
+            None
+        };
+
+        let pose = act.scene.pose();
         cat.player.set_mirrored(pose.mirrored);
         cat.carrying = pose.carrying;
+        cat.alpha = pose.alpha;
+        cat.clip_y = pose.clip_y;
+        cat.win_y = pose.cat.1;
+        if cat
+            .fade
+            .as_ref()
+            .is_some_and(|f| f.started.elapsed().as_secs_f32() >= FADE_SECS)
+        {
+            cat.fade = None;
+        }
 
         // SAFETY: valid windows owned by this thread.
         unsafe {
-            if pose.cat_visible != act.cat_shown {
-                let cmd = if pose.cat_visible {
+            if pose.visible != act.cat_shown {
+                let cmd = if pose.visible {
                     SW_SHOWNOACTIVATE
                 } else {
                     SW_HIDE
                 };
                 let _ = ShowWindow(cat.hwnd, cmd);
-                act.cat_shown = pose.cat_visible;
+                act.cat_shown = pose.visible;
             }
-            if pose.cat_visible {
+            if pose.visible {
                 let _ = SetWindowPos(
                     cat.hwnd,
                     None,
@@ -403,18 +466,23 @@ fn scene_tick() {
                 }
             }
         }
-        act.scene.phase() == Phase::Done
+        let finished = act.scene.is_done();
+        cat.scene = Some(act);
+        (finished, deliver)
     })
-    .unwrap_or(false);
+    .unwrap_or((false, None));
     render();
+    if let Some(f) = deliver {
+        f();
+    }
     if finished {
         end_scene();
     }
 }
 
-/// Tear the scene down, send the cat home, then hand the file over.
+/// Tear the scene down and leave the cat sitting in its corner.
 fn end_scene() {
-    let done = with_cat(|cat| {
+    let leftover = with_cat(|cat| {
         let act = cat.scene.take()?;
         cat.carrying = false;
         cat.player.set_mirrored(act.was_mirrored);
@@ -430,7 +498,8 @@ fn end_scene() {
     })
     .flatten();
     release();
-    if let Some(f) = done {
+    // Only reached if the scene ended before the hand-over (it never should); never lose the action.
+    if let Some(f) = leftover {
         f();
     }
 }
@@ -631,6 +700,24 @@ fn render() {
                 if let Some((mx, my)) = cat.player.mouth() {
                     props::draw_file(dst, W, H, mx, my);
                 }
+            }
+            if let Some(f) = &cat.fade {
+                // Cross-dissolve (premultiplied pixels, so a plain linear blend is correct).
+                let k = (f.started.elapsed().as_secs_f32() / FADE_SECS).min(1.0);
+                for (d, s) in dst.iter_mut().zip(&f.from) {
+                    *d = (*d as f32 * k + *s as f32 * (1.0 - k)) as u8;
+                }
+            }
+            if cat.alpha < 1.0 {
+                let a = cat.alpha.max(0.0);
+                for b in dst.iter_mut() {
+                    *b = (*b as f32 * a) as u8;
+                }
+            }
+            if let Some(cy) = cat.clip_y {
+                // Behind the folder: nothing of the cat shows below the folder's bottom edge.
+                let row = (cy - cat.win_y).clamp(0, H) as usize;
+                dst[row * W as usize * 4..].fill(0);
             }
 
             let size = SIZE { cx: W, cy: H };

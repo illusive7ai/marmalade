@@ -1,6 +1,6 @@
-fps = 15
+fps = 16
 loop = false
-frames = 36
+frames = 32
 
 [anchor]
 x = 128

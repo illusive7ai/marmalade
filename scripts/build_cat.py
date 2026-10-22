@@ -1,4 +1,5 @@
-﻿"""Turn the Dreamina clips into Marmalade sprite packs (256x256 RGBA lossless WebP + anim.toml).
+# NOTE: the clip and output paths below are machine-specific; edit SCRATCH, A, B and OUT before running.
+"""Turn the Dreamina clips into Marmalade sprite packs (256x256 RGBA lossless WebP + anim.toml).
 
 Run:  python -I build_cat.py [anim ...]     (no args = all)
 """
@@ -19,20 +20,20 @@ SW, SH = 832, 1120        # source size
 CANVAS = 256
 FOOT = (128, 248)         # where the feet go in the 256x256 frame
 S = 0.33                  # shared source->frame scale (same for every clip so the cat is the same size)
-SCALE = {'carry': 0.29, 'lie': 0.30}   # per-animation overrides where the cat is wider than the frame
+SCALE = {'carry': 0.29, 'lie': 0.30, 'leap': 0.31}   # per-animation overrides where the cat is wider than the frame
 S_PEEK = 0.18             # the peek clip is framed much closer; shrink it so the head matches the others
 FPS_SRC = 24
 
 # name: (file, t0, t1, mode, loop-search or None, fps)
 #   mode: 'stand' (feet on the ground, centred), 'follow' (centred per frame), 'leap', 'peek'
 ANIMS = {
-    'walk':  (B + r'\d1.mp4', 0.0, 4.0, 'stand', (30, 72), 12),
+    'walk':  (B + r'\d1.mp4', 0.0, 4.0, 'stand', (30, 72), 24),
     'sleep': (B + r'\d4.mp4', 0.0, 4.0, 'stand', (48, 90), 12),
     'sit':   (A + r'\c5.mp4', 1.7, 4.0, 'stand', (36, 54), 12),
     'lie':   (A + r'\c3.mp4', 1.7, 4.0, 'stand', (30, 54), 12),
-    'carry': (B + r'\d5.mp4', 2.9, 4.0, 'follow', (16, 25), 12),
-    'leap':  (B + r'\d2.mp4', 1.3, 2.45, 'leap', None, 12),
-    'peek':  (B + r'\d3.mp4', 0.3, 3.9, 'peek', None, 15),
+    'carry': (B + r'\d5.mp4', 2.9, 4.0, 'follow', (16, 25), 24),
+    'leap':  (B + r'\d2.mp4', 0.8, 2.45, 'leap', None, 24),
+    'peek':  (B + r'\d3.mp4', 0.4, 3.4, 'peek', None, 16),
 }
 
 
@@ -117,10 +118,10 @@ def build_frames(name):
         s = S_
     elif mode == 'leap':
         b0 = boxes[0]
-        ox = round(98 - S * (b0[0] + b0[1]) / 2)
-        oy = round(FOOT[1] - S * b0[3])
+        ox = round(FOOT[0] - S_ * (b0[0] + b0[1]) / 2)   # centred like the walk, so walk -> leap lines up
+        oy = round(FOOT[1] - S_ * b0[3])
         offs = [(ox, oy)] * len(keyed)
-        s = S
+        s = S_
     elif mode == 'peek':
         ox = round(FOOT[0] - S_PEEK * cx_union)
         oy = round((CANVAS - 1) - S_PEEK * (SH - 1))
@@ -128,7 +129,13 @@ def build_frames(name):
         s = S_PEEK
     else:
         raise ValueError(mode)
-    return [place(scale_rgba(k, s), *o) for k, o in zip(keyed, offs)]
+    placed = [place(scale_rgba(k, s), *o) for k, o in zip(keyed, offs)]
+    if mode == 'leap':   # stop before the cat is cut off by the edge of the frame; the app carries it into the folder
+        for i, c in enumerate(placed):
+            if (c[:, CANVAS - 3:, 3] > 128).any():
+                placed = placed[:max(i, 8)]
+                break
+    return placed
 
 
 def small(c):
@@ -213,9 +220,10 @@ def main(names):
             info += f', loop a={a} L={L} seam_mse={d:.5f}'
             loop = True
         elif name == 'peek':
-            # 1.5x faster than the source, sampled on a 15 fps grid
-            n = int((len(frames) - 1) / FPS_SRC / 0.1) + 1
-            seg = [frames[min(len(frames) - 1, round(k * 0.1 * FPS_SRC))] for k in range(n)]
+            # 1.5x faster than the source
+            stride = 1.5 / fps   # source seconds per output frame (1.5x speed)
+            n = int((len(frames) - 1) / FPS_SRC / stride) + 1
+            seg = [frames[min(len(frames) - 1, round(k * stride * FPS_SRC))] for k in range(n)]
             loop = False
         else:
             seg = frames[::step]

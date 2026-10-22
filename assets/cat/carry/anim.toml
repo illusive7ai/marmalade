@@ -1,11 +1,11 @@
-fps = 12
+fps = 24
 loop = true
-frames = 8
+frames = 16
 
 [anchor]
 x = 128
 y = 248
 
 [mouth]
-x = 239
+x = 238
 y = 144
