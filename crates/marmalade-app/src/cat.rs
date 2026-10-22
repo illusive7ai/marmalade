@@ -84,6 +84,9 @@ struct Active {
     scene: Scene,
     folder: Option<Prop>,
     folder_shown: bool,
+    /// The file once it has left the cat's mouth.
+    file: Option<Prop>,
+    file_shown: bool,
     cat_shown: bool,
     was_mirrored: bool,
     on_done: Option<Box<dyn FnOnce()>>,
@@ -342,7 +345,15 @@ pub fn start_fetch(on_done: Box<dyn FnOnce()>) {
             .ok()
             .and_then(|_| probe.duration())
             .map_or(1.0, |d| d.as_secs_f64());
-        let segs = fetch::build(plan, leap_secs, corner_position());
+        // Where the carried file sits against the cat's face on the way back (that clip faces
+        // the other way from the leap).
+        probe.set_mirrored(plan.dir >= 0);
+        let mouth = probe
+            .play("carry")
+            .ok()
+            .and_then(|_| probe.mouth())
+            .unwrap_or((200, 150));
+        let segs = fetch::build(plan, leap_secs, corner_position(), mouth);
 
         let was_mirrored = cat.player.mirrored();
         cat.player.set_mirrored(segs[0].mirrored);
@@ -363,6 +374,22 @@ pub fn start_fetch(on_done: Box<dyn FnOnce()>) {
                 plan.folder,
             ),
             folder_shown: true,
+            file: {
+                let file = create_prop(
+                    &props::file_pixels(),
+                    props::FILE_W,
+                    props::FILE_H,
+                    plan.folder,
+                );
+                if let Some(f) = &file {
+                    // SAFETY: valid window created just above on this thread.
+                    unsafe {
+                        let _ = ShowWindow(f.hwnd, SW_HIDE);
+                    }
+                }
+                file
+            },
+            file_shown: false,
             cat_shown: true,
             was_mirrored,
             on_done: callback.take(),
@@ -466,6 +493,33 @@ fn scene_tick() {
                 }
             }
         }
+        if let Some(file) = &act.file {
+            // SAFETY: valid window owned by this thread.
+            unsafe {
+                match pose.file {
+                    Some(pos) => {
+                        let _ = SetWindowPos(
+                            file.hwnd,
+                            None,
+                            pos.0,
+                            pos.1,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                        );
+                        if !act.file_shown {
+                            let _ = ShowWindow(file.hwnd, SW_SHOWNOACTIVATE);
+                            act.file_shown = true;
+                        }
+                    }
+                    None if act.file_shown => {
+                        let _ = ShowWindow(file.hwnd, SW_HIDE);
+                        act.file_shown = false;
+                    }
+                    None => {}
+                }
+            }
+        }
         let finished = act.scene.is_done();
         cat.scene = Some(act);
         (finished, deliver)
@@ -492,6 +546,9 @@ fn end_scene() {
             let _ = ShowWindow(cat.hwnd, SW_SHOWNOACTIVATE);
             if let Some(folder) = act.folder {
                 destroy_prop(folder);
+            }
+            if let Some(file) = act.file {
+                destroy_prop(file);
             }
         }
         act.on_done
@@ -695,12 +752,13 @@ fn render() {
         unsafe {
             let dst = std::slice::from_raw_parts_mut(cat.bits, (W * H * 4) as usize);
             dst.fill(0);
-            cat.player.blit(dst, W as u32, H as u32, 0, 0);
             if cat.carrying {
+                // Behind the cat, so its chin overlaps the paper: held in the mouth, not floating.
                 if let Some((mx, my)) = cat.player.mouth() {
                     props::draw_file(dst, W, H, mx, my);
                 }
             }
+            cat.player.blit(dst, W as u32, H as u32, 0, 0);
             if let Some(f) = &cat.fade {
                 // Cross-dissolve (premultiplied pixels, so a plain linear blend is correct).
                 let k = (f.started.elapsed().as_secs_f32() / FADE_SECS).min(1.0);

@@ -172,7 +172,8 @@ def mouth_point(frames):
                 best_x, best_y = xr, y
         pts.append((best_x, best_y))
     p = np.mean(pts, axis=0)
-    return int(round(p[0])) - 3, int(round(p[1])) + 5
+    # The paper hangs from the jaw, just behind the nose; the app draws it behind the cat's chin.
+    return int(round(p[0])) - 6, int(round(p[1])) + 16
 
 
 def save_pack(name, frames, fps, loop, mouth=None):

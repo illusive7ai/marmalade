@@ -6,6 +6,7 @@
 //! then it strolls home. `cat.rs` drives this and applies each `Pose`.
 
 use crate::cat::W;
+use crate::props::{FILE_H, FILE_W};
 
 pub const FOLDER_W: i32 = 96;
 pub const FOLDER_H: i32 = 80;
@@ -77,6 +78,35 @@ pub enum Until {
     },
 }
 
+/// The carried file leaving the cat's mouth and landing on the ground.
+#[derive(Debug, Clone, Copy)]
+pub struct FileDrop {
+    /// Top-left of the icon, at the mouth and where it comes to rest.
+    pub from: (f64, f64),
+    pub to: (f64, f64),
+    /// Seconds into the segment before it lets go, and how long the fall takes.
+    pub delay: f64,
+    pub secs: f64,
+}
+
+/// Ease-out bounce: 0 to 1, rebounding a little before it settles (a dropped object).
+fn bounce(q: f64) -> f64 {
+    let (n, d) = (7.5625, 2.75);
+    let q = q.clamp(0.0, 1.0);
+    if q < 1.0 / d {
+        n * q * q
+    } else if q < 2.0 / d {
+        let q = q - 1.5 / d;
+        n * q * q + 0.75
+    } else if q < 2.5 / d {
+        let q = q - 2.25 / d;
+        n * q * q + 0.9375
+    } else {
+        let q = q - 2.625 / d;
+        n * q * q + 0.984375
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Seg {
     #[allow(dead_code)] // read by the tests; handy when debugging a scene
@@ -102,6 +132,8 @@ pub struct Seg {
     pub clip_line: bool,
     /// Hand over the file when this segment starts.
     pub deliver: bool,
+    /// The file falling out of the cat's mouth during this segment.
+    pub file: Option<FileDrop>,
 }
 
 impl Seg {
@@ -124,6 +156,7 @@ impl Seg {
             shake: false,
             clip_line: false,
             deliver: false,
+            file: None,
         }
     }
 
@@ -171,8 +204,9 @@ pub fn plan(origin: (i32, i32), work_left: i32, work_right: i32) -> Plan {
 }
 
 /// The whole performance. `leap_secs` is the length of the leap clip; `home` is where the cat's
-/// window rests in its corner.
-pub fn build(plan: Plan, leap_secs: f64, home: (i32, i32)) -> Vec<Seg> {
+/// window rests in its corner; `mouth` is where the carried file is held in the cat's window while
+/// it walks back (already flipped for the direction it faces).
+pub fn build(plan: Plan, leap_secs: f64, home: (i32, i32), mouth: (i32, i32)) -> Vec<Seg> {
     let (ox, oy) = (plan.origin.0 as f64, plan.origin.1 as f64);
     let d = plan.dir as f64;
     let at_folder = plan.at_folder_x as f64;
@@ -237,12 +271,26 @@ pub fn build(plan: Plan, leap_secs: f64, home: (i32, i32)) -> Vec<Seg> {
     ret.clip_line = true;
     segs.push(ret);
 
-    // 6. Sit down; the file is handed over.
+    // 6. Sit down and drop the file on the ground in front of the paws.
+    // The cat sits facing back the way it came (mirrored when it set out to the right).
+    let facing = if out_mirrored { 1.0 } else { -1.0 };
+    let (fw, fh) = (FILE_W as f64, FILE_H as f64);
     let mut settle = Seg::base(Name::Settle, (ox, oy));
     settle.clip = Some("sit");
-    settle.until = Until::Secs(1.1);
+    settle.until = Until::Secs(1.9);
     settle.mirrored = !out_mirrored;
-    settle.deliver = true;
+    settle.file = Some(FileDrop {
+        from: (
+            ox + mouth.0 as f64 - fw / 2.0,
+            oy + mouth.1 as f64 - fh / 2.0,
+        ),
+        to: (
+            ox + W as f64 / 2.0 + facing * 74.0 - fw / 2.0,
+            oy + FEET as f64 - fh + 4.0,
+        ),
+        delay: 0.25,
+        secs: 0.55,
+    });
     segs.push(settle);
 
     // 7. Stroll home to the corner.
@@ -261,6 +309,13 @@ pub fn build(plan: Plan, leap_secs: f64, home: (i32, i32)) -> Vec<Seg> {
         // Same column, different height: no walk to show, just settle into place.
         segs.last_mut().expect("settle").to = (hx, hy);
     }
+
+    // The file is opened as the cat leaves it behind.
+    let settle_idx = segs
+        .iter()
+        .position(|s| s.name == Name::Settle)
+        .expect("settle");
+    segs[settle_idx + 1].deliver = true;
 
     // 8. Settle into the corner: a short sit so the walk dissolves into the resting pose.
     let end = segs.last().expect("settle").to;
@@ -284,6 +339,8 @@ pub struct Pose {
     pub folder_visible: bool,
     /// Screen y at and below which the cat is hidden (behind the folder), if any.
     pub clip_y: Option<i32>,
+    /// Top-left of the dropped file's icon while it is out of the cat's mouth and on the desktop.
+    pub file: Option<(i32, i32)>,
 }
 
 pub struct Scene {
@@ -379,6 +436,12 @@ impl Scene {
             folder,
             folder_visible: seg.folder && !self.is_done(),
             clip_y: seg.clip_line.then_some(self.folder.1 + FOLDER_H),
+            file: seg.file.map(|f| {
+                let q = ((q_time - f.delay) / f.secs).clamp(0.0, 1.0);
+                let x = f.from.0 + (f.to.0 - f.from.0) * ease(Ease::Out, q);
+                let y = f.from.1 + (f.to.1 - f.from.1) * bounce(q);
+                (x.round() as i32, y.round() as i32)
+            }),
         }
     }
 }
@@ -390,10 +453,11 @@ mod tests {
     const LEFT: i32 = 0;
     const RIGHT: i32 = 1920;
     const HOME: (i32, i32) = (1650, 780);
+    const MOUTH: (i32, i32) = (20, 150);
 
     fn segs(origin: (i32, i32), leap_secs: f64) -> (Plan, Vec<Seg>) {
         let p = plan(origin, LEFT, RIGHT);
-        (p, build(p, leap_secs, HOME))
+        (p, build(p, leap_secs, HOME, MOUTH))
     }
 
     fn names(v: &[Seg]) -> Vec<Name> {
@@ -483,7 +547,8 @@ mod tests {
             scene.tick(0.016, done);
             if scene.take_deliver() {
                 delivered += 1;
-                assert_eq!(scene.current().unwrap().name, Name::Settle);
+                // The file is opened once the cat has dropped it and gets up to leave.
+                assert_eq!(scene.current().unwrap().name, Name::Home);
             }
             if scene.is_done() {
                 break;
@@ -560,6 +625,51 @@ mod tests {
     }
 
     #[test]
+    fn the_file_is_carried_then_dropped_in_front_of_the_sitting_cat() {
+        for origin in [(300, 600), (1600, 600)] {
+            let (p, v) = segs(origin, 0.8);
+            let facing = if v.iter().any(|s| s.name == Name::Settle && s.mirrored) {
+                -1
+            } else {
+                1
+            };
+            let mut scene = Scene::new(v, p.folder);
+            let (mut first, mut last) = (None, None);
+            while let Some(seg) = scene.current().copied() {
+                let pose = scene.pose();
+                // On the desktop only while sitting; in the mouth (drawn by the cat) before that.
+                assert_eq!(
+                    pose.file.is_some(),
+                    seg.name == Name::Settle,
+                    "{:?}",
+                    seg.name
+                );
+                if let Some(f) = pose.file {
+                    first.get_or_insert(f);
+                    last = Some(f);
+                }
+                let done = scene.t > 0.3;
+                scene.tick(0.016, done);
+            }
+            let (first, last) = (first.unwrap(), last.unwrap());
+            assert!(last.1 > first.1 + 40, "it falls");
+            assert!(
+                (last.0 - (origin.0 + 128)) * facing > 40,
+                "it lands ahead of the cat, not under it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_file_bounces_and_settles_at_rest() {
+        let ys: Vec<f64> = (0..=20).map(|i| bounce(i as f64 / 20.0)).collect();
+        assert_eq!(ys[0], 0.0);
+        assert!((ys[20] - 1.0).abs() < 1e-9);
+        assert!(ys.windows(2).any(|w| w[1] < w[0]), "no rebound");
+        assert!(ys.iter().all(|&y| (0.0..=1.0).contains(&y)));
+    }
+
+    #[test]
     fn a_clip_that_never_finishes_cannot_hang_the_scene() {
         let (p, v) = segs((300, 600), 0.8);
         let mut scene = Scene::new(v, p.folder);
@@ -576,7 +686,7 @@ mod tests {
             origin: (p.at_folder_x - 100, 600),
             ..p
         };
-        let v = build(close, 0.8, HOME);
+        let v = build(close, 0.8, HOME, MOUTH);
         assert_eq!(v[0].name, Name::Leap);
     }
 }

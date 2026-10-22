@@ -112,6 +112,13 @@ pub fn draw_file(dst: &mut [u8], dst_w: i32, dst_h: i32, cx: i32, cy: i32) {
     }
 }
 
+/// The file icon on its own, for the window it becomes once the cat drops it.
+pub fn file_pixels() -> Vec<u8> {
+    let mut buf = vec![0u8; (FILE_W * FILE_H * 4) as usize];
+    draw_file(&mut buf, FILE_W, FILE_H, FILE_W / 2, FILE_H / 2);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +134,13 @@ mod tests {
         assert_eq!(alpha(&px, FOLDER_W, FOLDER_W / 2, FOLDER_H / 2), 255);
         assert_eq!(alpha(&px, FOLDER_W, 0, FOLDER_H - 1), 0); // rounded bottom-left corner
         assert_eq!(alpha(&px, FOLDER_W, FOLDER_W - 1, 0), 0); // beside the tab
+    }
+
+    #[test]
+    fn the_dropped_file_icon_fills_its_own_window() {
+        let px = file_pixels();
+        assert_eq!(px.len(), (FILE_W * FILE_H * 4) as usize);
+        assert_eq!(alpha(&px, FILE_W, FILE_W / 2, FILE_H / 2), 255);
     }
 
     #[test]
